@@ -95,6 +95,38 @@ export default function SettingsPage({ settings: initSettings, onSave }) {
           </div>
         </div>
 
+        {/* Style de visualisation du trajet */}
+        <div>
+          <label className="label">Visualisation du trajet</label>
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              {
+                id: 'bar',
+                label: '▬ Chronogramme',
+                desc: 'Barre temporelle avec les segments',
+              },
+              {
+                id: 'pie',
+                label: '◉ Camembert',
+                desc: 'Répartition en graphique circulaire',
+              },
+            ].map(opt => (
+              <button
+                key={opt.id}
+                onClick={() => update('timelineStyle', opt.id)}
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  (settings.timelineStyle || 'bar') === opt.id
+                    ? 'border-accent bg-accent/10'
+                    : 'border-bg-border bg-bg-elevated hover:bg-bg-border'
+                }`}
+              >
+                <div className="text-sm font-medium text-bright">{opt.label}</div>
+                <div className="text-xs text-muted mt-0.5">{opt.desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Prix du carburant */}
         <div>
           <div className="flex items-center justify-between mb-2">

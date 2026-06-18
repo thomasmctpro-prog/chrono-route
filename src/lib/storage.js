@@ -190,6 +190,7 @@ const defaultSettings = {
   distanceUnit: 'km',
   theme: 'dark',
   fuelPrice: 1.65,
+  timelineStyle: 'bar', // 'bar' = chronogramme | 'pie' = camembert
 }
 
 export function getSettings() {

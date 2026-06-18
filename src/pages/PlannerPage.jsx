@@ -4,9 +4,11 @@ import {
   Zap, CalendarClock, ArrowRightLeft, AlertCircle, CheckCircle2,
   Info, Coffee, Lightbulb, BookCheck, Plus, X, GripVertical,
   Moon, Truck, MapPin, Package, Fuel, Wrench,
+  BarChart2, PieChart,
 } from 'lucide-react'
 import AddressInput from '../components/AddressInput.jsx'
 import TripTimeline from '../components/TripTimeline.jsx'
+import TripPieChart from '../components/TripPieChart.jsx'
 import ComplianceBadges from '../components/ComplianceBadges.jsx'
 import MapView from '../components/MapView.jsx'
 import FuelEstimate from '../components/FuelEstimate.jsx'
@@ -468,7 +470,7 @@ export default function PlannerPage({ settings }) {
       </div>
 
       {/* Résultats */}
-      {result && <TripResult result={result} mode={mode} buffer={buffer} />}
+      {result && <TripResult result={result} mode={mode} buffer={buffer} settings={settings} />}
     </div>
   )
 }
@@ -477,9 +479,12 @@ export default function PlannerPage({ settings }) {
 // Résultats
 // ---------------------------------------------------------------------------
 
-function TripResult({ result, mode, buffer }) {
+function TripResult({ result, mode, buffer, settings }) {
   const [showAlternative, setShowAlternative] = useState(false)
   const [mapOpen, setMapOpen] = useState(true)
+  const [chartStyle, setChartStyle] = useState(
+    () => settings?.timelineStyle || getSettings().timelineStyle || 'bar'
+  )
   const [loggedToday, setLoggedToday] = useState(() => {
     const todayKey = new Date().toISOString().substring(0, 10)
     const log = getWeeklyLog()
@@ -629,13 +634,47 @@ function TripResult({ result, mode, buffer }) {
         fuelPrice={fuelPrice}
       />
 
-      {/* Timeline */}
-      <TripTimeline
-        timeline={timeline}
-        totalTripMinutes={totalTripMinutes}
-        bufferMinutes={buffer}
-        days={days}
-      />
+      {/* Visualisation — toggle chronogramme / camembert */}
+      <div className="flex items-center justify-between px-1">
+        <span className="text-sm font-semibold text-sub">Visualisation du trajet</span>
+        <div className="flex gap-0.5 bg-bg-elevated rounded-lg p-0.5 border border-bg-border">
+          <button
+            onClick={() => setChartStyle('bar')}
+            title="Chronogramme"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+              chartStyle === 'bar'
+                ? 'bg-accent/20 text-accent shadow-sm'
+                : 'text-muted hover:text-sub'
+            }`}
+          >
+            <BarChart2 size={13} />
+            Barre
+          </button>
+          <button
+            onClick={() => setChartStyle('pie')}
+            title="Camembert"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+              chartStyle === 'pie'
+                ? 'bg-accent/20 text-accent shadow-sm'
+                : 'text-muted hover:text-sub'
+            }`}
+          >
+            <PieChart size={13} />
+            Camembert
+          </button>
+        </div>
+      </div>
+
+      {chartStyle === 'pie' ? (
+        <TripPieChart timeline={timeline} bufferMinutes={buffer} days={days} />
+      ) : (
+        <TripTimeline
+          timeline={timeline}
+          totalTripMinutes={totalTripMinutes}
+          bufferMinutes={buffer}
+          days={days}
+        />
+      )}
 
       {/* Conformité */}
       <div>
