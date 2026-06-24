@@ -325,38 +325,63 @@ export default function LicCard({ days, plateNumber }) {
   function handlePrint() {
     const content = printRef.current?.innerHTML
     if (!content) return
-    const win = window.open('', '_blank', 'width=800,height=600')
+
+    // Récupérer les CSS externes (URLs absolues) et styles inline du document courant
+    const linkTags = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+      .map(el => `<link rel="stylesheet" href="${el.href}">`)
+      .join('\n')
+    const styleTags = Array.from(document.querySelectorAll('style'))
+      .map(el => el.outerHTML)
+      .join('\n')
+
+    const win = window.open('', '_blank', 'width=900,height=700')
     win.document.write(`<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>Livret de Contrôle — ChronoRoute</title>
+  ${linkTags}
+  ${styleTags}
   <style>
-    body { font-family: 'Arial', sans-serif; margin: 10mm; background: #fff; color: #000; }
-    .lic-day-section { page-break-after: always; margin-bottom: 8mm; }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body {
+      background: #0f172a !important;
+      color: #e2e8f0;
+      margin: 0;
+      padding: 20px;
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+    .lic-day-section { page-break-after: always; }
     .lic-day-section:last-child { page-break-after: auto; }
-    /* Couleurs en noir/gris pour impression B&W */
-    div[style*="background-color"] { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
-    /* Override dark theme colors */
-    .text-muted, .text-sub { color: #555 !important; }
-    .text-bright, .text-text { color: #000 !important; }
-    .bg-bg-elevated { background: #f5f5f5 !important; }
-    .border-bg-border { border-color: #ccc !important; }
+    @media print {
+      html, body { background: #0f172a !important; }
+      * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    }
   </style>
 </head>
 <body>
-  <h2 style="text-align:center;font-size:14pt;margin-bottom:4mm">LIVRET INDIVIDUEL DE CONTRÔLE</h2>
-  <p style="text-align:center;font-size:9pt;color:#555;margin-bottom:6mm">
-    Trajet planifié via ChronoRoute — À titre indicatif
-  </p>
-  ${content}
-  <p style="text-align:center;font-size:8pt;color:#888;margin-top:6mm">
-    Généré le ${new Date().toLocaleDateString('fr-FR')} · ChronoRoute v1.0
-  </p>
+  <div style="max-width:820px;margin:0 auto">
+    <h2 style="text-align:center;font-size:15pt;margin-bottom:6px;color:#f1f5f9;font-weight:700;letter-spacing:.5px">
+      LIVRET INDIVIDUEL DE CONTRÔLE
+    </h2>
+    <p style="text-align:center;font-size:9pt;color:#64748b;margin-bottom:20px">
+      Trajet planifié via ChronoRoute — À titre indicatif
+    </p>
+    <div class="space-y-6">${content}</div>
+    <p style="text-align:center;font-size:8pt;color:#475569;margin-top:20px">
+      Généré le ${new Date().toLocaleDateString('fr-FR')} · ChronoRoute v1.0
+    </p>
+  </div>
+  <script>
+    window.addEventListener('load', function () {
+      setTimeout(function () { window.focus(); window.print(); }, 300);
+    });
+  <\/script>
 </body>
 </html>`)
     win.document.close()
-    setTimeout(() => { win.focus(); win.print() }, 400)
   }
 
   return (
