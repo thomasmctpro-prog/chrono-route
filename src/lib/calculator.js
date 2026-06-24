@@ -382,7 +382,11 @@ function buildMultiLegSegments({
 
 /**
  * Parse une chaîne "HH:MM" sur le même jour calendaire que referenceDate.
- * Si l'heure calculée est plus de 30 min dans le passé → avance d'un jour.
+ *
+ * NOTE : pas de logique "lendemain". referenceDate est déjà la date/heure
+ * réelle d'arrivée au stop (elle intègre les changements de jour automatiquement
+ * via le cumul elapsed depuis le départ). Avancer d'un jour serait une erreur
+ * et générerait des attentes de ~23h.
  */
 function parseTimeWindowDate(timeStr, referenceDate) {
   if (!timeStr || !timeStr.includes(':')) return null
@@ -390,10 +394,6 @@ function parseTimeWindowDate(timeStr, referenceDate) {
   if (isNaN(h) || isNaN(m)) return null
   const d = new Date(referenceDate)
   d.setHours(h, m, 0, 0)
-  // Si le créneau est clairement passé (ex : référence=14h, créneau=08h) → lendemain
-  if (d.getTime() < referenceDate.getTime() - 30 * 60_000) {
-    d.setDate(d.getDate() + 1)
-  }
   return d
 }
 
@@ -406,7 +406,7 @@ function parseTimeWindowDate(timeStr, referenceDate) {
  * @param {Array}  legs          - legs avec stopTimeWindow, departureStop.timeWindow, arrivalStop.timeWindow
  */
 function injectTimeWindowWaits(segments, departureTime, legs) {
-  const result    = []
+  const result     = []
   const violations = []
   let elapsed = 0   // minutes écoulées depuis le départ
 
@@ -422,37 +422,55 @@ function injectTimeWindowWaits(segments, departureTime, legs) {
         tw = legs[seg.legIndex]?.stopTimeWindow
       }
 
-      if (tw?.enabled && (tw.exact || tw.from)) {
+      if (tw?.enabled) {
         const arrivalDate = new Date(departureTime.getTime() + elapsed * 60_000)
 
-        const openDate  = parseTimeWindowDate(tw.mode === 'exact' ? tw.exact : tw.from, arrivalDate)
-        const closeDate = tw.mode === 'window' && tw.to
-          ? parseTimeWindowDate(tw.to, arrivalDate)
-          : openDate   // pour 'exact', on tolère 1 min après
+        // ── Calcul des bornes selon le mode ──────────────────────────────
+        //
+        // 'exact'  : rendez-vous fixe — attendre si trop tôt, violation si trop tard
+        // 'window' : créneau ouverture→fermeture — attendre si avant FROM, violation si après TO
+        // 'before' : délai impératif — AUCUNE attente, juste violation si après la deadline
+        //
+        let openDate  = null   // heure à partir de laquelle on peut commencer (génère attente si trop tôt)
+        let closeDate = null   // heure limite (génère violation si dépassée)
 
+        if (tw.mode === 'exact' && tw.exact) {
+          openDate  = parseTimeWindowDate(tw.exact, arrivalDate)
+          closeDate = openDate                                    // doit arriver à cette heure précise
+        } else if (tw.mode === 'window') {
+          openDate  = tw.from ? parseTimeWindowDate(tw.from, arrivalDate) : null
+          closeDate = tw.to   ? parseTimeWindowDate(tw.to,   arrivalDate) : null
+        } else if (tw.mode === 'before' && tw.exact) {
+          openDate  = null                                        // pas de minimum — arrive quand on veut
+          closeDate = parseTimeWindowDate(tw.exact, arrivalDate) // juste ne pas dépasser cette heure
+        }
+
+        // ── Attente si arrivée trop tôt ──────────────────────────────────
         if (openDate && arrivalDate < openDate) {
-          // Trop tôt — attendre l'ouverture du créneau
           const waitMin = Math.max(1, Math.round((openDate - arrivalDate) / 60_000))
           result.push({
             type: 'wait',
             duration: waitMin,
             reason: tw.mode === 'exact'
-              ? `⏳ Attente créneau — heure fixée à ${tw.exact}`
+              ? `⏳ Attente rendez-vous — ${tw.exact}`
               : `⏳ Attente ouverture créneau ${tw.from}–${tw.to}`,
             isTimeWindowWait: true,
             atKm: seg.atKm || 0,
             windowInfo: { ...tw },
           })
           elapsed += waitMin
-        } else if (closeDate && arrivalDate > new Date(closeDate.getTime() + 60_000)) {
-          // Trop tard — violation de créneau
-          violations.push({
-            stopLabel: seg.label || seg.reason?.split(' — ')[0] || 'Arrêt',
-            windowStr: tw.mode === 'exact'
-              ? `exactement à ${tw.exact}`
-              : `entre ${tw.from} et ${tw.to}`,
-            lateBy: Math.round((arrivalDate - closeDate) / 60_000),
-          })
+        }
+
+        // ── Violation si arrivée trop tardive (tolérance 2 min) ──────────
+        const TOLERANCE_MS = 2 * 60_000
+        if (closeDate && arrivalDate > new Date(closeDate.getTime() + TOLERANCE_MS)) {
+          const lateBy = Math.round((arrivalDate - closeDate) / 60_000)
+          const label  = seg.label || seg.reason?.split(' — ')[0] || 'Arrêt'
+          let windowStr
+          if (tw.mode === 'exact')  windowStr = `exactement à ${tw.exact}`
+          else if (tw.mode === 'window') windowStr = `entre ${tw.from} et ${tw.to}`
+          else                      windowStr = `avant ${tw.exact}`
+          violations.push({ stopLabel: label, windowStr, lateBy })
         }
       }
     }

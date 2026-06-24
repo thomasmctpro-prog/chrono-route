@@ -46,6 +46,17 @@ function newStop() {
  * Sélecteur compact de contrainte horaire (heure exacte ou fourchette).
  * tw = { enabled, mode: 'exact'|'window', exact: 'HH:MM', from: 'HH:MM', to: 'HH:MM' }
  */
+/**
+ * Sélecteur compact de contrainte horaire.
+ *
+ * Modes :
+ *   'exact'  — Rendez-vous fixe : attente si trop tôt, alerte si en retard
+ *              Ex. "Chargement à 08h00 pile"
+ *   'window' — Créneau FROM→TO : attente avant FROM, alerte après TO
+ *              Ex. "Livraison entre 13h et 16h"
+ *   'before' — Délai impératif : aucune attente, alerte si après l'heure
+ *              Ex. "Livraison avant 20h"
+ */
 function TimeWindowPicker({ tw, onChange }) {
   const val = tw || { enabled: false, mode: 'exact', exact: '', from: '', to: '' }
 
@@ -70,20 +81,14 @@ function TimeWindowPicker({ tw, onChange }) {
         value={val.mode}
         onChange={e => onChange({ ...val, mode: e.target.value })}
         className="input-field text-xs py-0.5 pr-5 flex-shrink-0"
-        style={{ width: 'auto', minWidth: 104 }}
+        style={{ width: 'auto', minWidth: 100 }}
       >
-        <option value="exact">Heure exacte</option>
-        <option value="window">Créneau</option>
+        <option value="exact">À exactement</option>
+        <option value="window">Entre … et …</option>
+        <option value="before">Avant</option>
       </select>
-      {/* Saisie heure */}
-      {val.mode === 'exact' ? (
-        <input
-          type="time"
-          value={val.exact}
-          onChange={e => onChange({ ...val, exact: e.target.value })}
-          className="input-field text-xs py-0.5 w-24 flex-shrink-0"
-        />
-      ) : (
+      {/* Saisie heure selon le mode */}
+      {val.mode === 'window' ? (
         <>
           <input
             type="time"
@@ -99,6 +104,14 @@ function TimeWindowPicker({ tw, onChange }) {
             className="input-field text-xs py-0.5 w-20 flex-shrink-0"
           />
         </>
+      ) : (
+        /* 'exact' et 'before' : un seul champ heure */
+        <input
+          type="time"
+          value={val.exact}
+          onChange={e => onChange({ ...val, exact: e.target.value })}
+          className="input-field text-xs py-0.5 w-24 flex-shrink-0"
+        />
       )}
       <button
         type="button"
