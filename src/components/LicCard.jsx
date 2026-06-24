@@ -61,8 +61,9 @@ function LicGrid12h({ segments, startHour, dayDate }) {
   const TOTAL_CELLS = 12 * 4   // 48 cellules de 15 min
   const START_MIN = startHour * 60
 
-  // Matrice d'occupation : occ[row][cell] = color | null
-  const occ = Array.from({ length: 4 }, () => new Array(TOTAL_CELLS).fill(null))
+  // Matrice d'occupation PLATE : occ[cell] = { row, color } | null
+  // Un seul titulaire par cellule → pas de chevauchement visuel entre lignes
+  const occ = new Array(TOTAL_CELLS).fill(null)
 
   for (const seg of segments) {
     if (!seg.startTime || !seg.endTime) continue
@@ -85,7 +86,7 @@ function LicGrid12h({ segments, startHour, dayDate }) {
     const cellEnd   = Math.ceil(clampEnd   / CELL_MINUTES)
 
     for (let c = cellStart; c < cellEnd && c < TOTAL_CELLS; c++) {
-      if (c >= 0) occ[info.row][c] = info.color
+      if (c >= 0) occ[c] = { row: info.row, color: info.color }
     }
   }
 
@@ -179,16 +180,16 @@ function LicGrid12h({ segments, startHour, dayDate }) {
             )
           })}
 
-          {/* Barres d'activité */}
-          {occ.map((rowCells, rowIdx) => {
-            // Regrouper les cellules consécutives de même couleur en blocs
+          {/* Barres d'activité — on itère par ligne, chaque cellule n'appartient qu'à une ligne */}
+          {Array.from({ length: 4 }, (_, rowIdx) => {
+            // Regrouper les cellules consécutives appartenant à ce row (même couleur)
             const bars = []
             let i = 0
-            while (i < rowCells.length) {
-              if (rowCells[i]) {
-                const color = rowCells[i]
+            while (i < TOTAL_CELLS) {
+              if (occ[i]?.row === rowIdx) {
+                const color = occ[i].color
                 let j = i
-                while (j < rowCells.length && rowCells[j] === color) j++
+                while (j < TOTAL_CELLS && occ[j]?.row === rowIdx && occ[j]?.color === color) j++
                 bars.push({ start: i, end: j, color })
                 i = j
               } else {
