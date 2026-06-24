@@ -13,12 +13,13 @@ import ComplianceBadges from '../components/ComplianceBadges.jsx'
 import MapView from '../components/MapView.jsx'
 import FuelEstimate from '../components/FuelEstimate.jsx'
 import LicCard from '../components/LicCard.jsx'
+import { scheduleBreakNotifications, canNotify } from '../lib/notifications.js'
 import { planMultiLegTrip, STOP_TYPES } from '../lib/calculator.js'
 import { getRouteDuration } from '../lib/api.js'
 import {
   getDefaultVehicle, getVehicles, getWeeklyStats,
   addTripToHistory, addDayEntry, getWeeklyLog,
-  savePlannerForm, getPlannerForm, getSettings,
+  savePlannerForm, getPlannerForm, getSettings, saveLastRoute,
 } from '../lib/storage.js'
 import {
   VEHICLE_TYPES, formatTime, formatDuration, getVehicleType, getRules,
@@ -108,7 +109,8 @@ export default function PlannerPage({ settings }) {
       const waypoints = [origin, ...stops.map(s => s.place), dest]
 
       // Facteur vitesse selon le type de véhicule
-      const SPEED_FACTORS = { pl: 0.78, vul: 1.0, bus: 0.88 }
+      // PL : 90 km/h autoroute vs 130 km/h VL → facteur ~0.72 (mélange routes/autoroutes)
+      const SPEED_FACTORS = { pl: 0.72, vul: 1.0, bus: 0.85 }
       const factor = SPEED_FACTORS[vehicleTypeId] || 0.78
 
       // Calcul en parallèle de tous les tronçons
@@ -209,6 +211,24 @@ export default function PlannerPage({ settings }) {
         originLabel: origin.shortLabel,
         destLabel: dest.shortLabel,
       })
+
+      // Sauvegarder la route pour la page Carte
+      saveLastRoute({
+        waypoints,
+        geometries,
+        days: plan.days,
+        timeline: plan.timeline,
+        origin: origin.shortLabel,
+        dest: dest.shortLabel,
+        savedAt: new Date().toISOString(),
+      })
+
+      // Programmer les rappels de pause si activés
+      const appSettings = getSettings()
+      if (appSettings.notificationsEnabled && canNotify() && plan.timeline?.length) {
+        const count = scheduleBreakNotifications(plan.timeline, appSettings.notifLeadMinutes ?? 10)
+        if (count > 0) console.info(`[ChronoRoute] ${count} rappel(s) de pause programmé(s)`)
+      }
     } catch (e) {
       console.error(e)
       setError('Erreur lors du calcul. Vérifiez votre connexion et réessayez.')

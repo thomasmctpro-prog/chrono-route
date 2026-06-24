@@ -190,7 +190,9 @@ const defaultSettings = {
   distanceUnit: 'km',
   theme: 'dark',
   fuelPrice: 1.65,
-  timelineStyle: 'bar', // 'bar' = chronogramme | 'pie' = camembert
+  timelineStyle: 'bar',       // 'bar' = chronogramme | 'pie' = camembert
+  notificationsEnabled: false, // Rappels de pause (Web Notifications API)
+  notifLeadMinutes: 10,        // Minutes d'avance pour les rappels
 }
 
 export function getSettings() {
@@ -270,4 +272,16 @@ export function clearAllData() {
   Object.keys(localStorage)
     .filter(k => k.startsWith(PREFIX))
     .forEach(k => localStorage.removeItem(k))
+}
+
+// ---------------------------------------------------------------------------
+// Dernière route planifiée (pour la page Carte)
+// ---------------------------------------------------------------------------
+
+export function saveLastRoute(routeData) {
+  save('last_route', routeData)
+}
+
+export function getLastRoute() {
+  return load('last_route', null)
 }

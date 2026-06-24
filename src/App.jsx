@@ -1,18 +1,19 @@
 import React, { useState, useEffect } from 'react'
-import { Truck, BarChart3, Settings, Map, GaugeCircle } from 'lucide-react'
+import { Truck, BarChart3, Settings, Map, GaugeCircle, MapPin } from 'lucide-react'
 import PlannerPage from './pages/PlannerPage.jsx'
 import VehiclesPage from './pages/VehiclesPage.jsx'
 import WeeklyLogPage from './pages/WeeklyLogPage.jsx'
 import SettingsPage from './pages/SettingsPage.jsx'
 import TachographPage from './pages/TachographPage.jsx'
+import MapPage from './pages/MapPage.jsx'
 import { getSettings } from './lib/storage.js'
 
 const PAGES = [
-  { id: 'planner', label: 'Planifier', icon: Map },
-  { id: 'tacho', label: 'Tachy', icon: GaugeCircle },
-  { id: 'weekly', label: 'Mon solde', icon: BarChart3 },
-  { id: 'vehicles', label: 'Véhicules', icon: Truck },
-  { id: 'settings', label: 'Réglages', icon: Settings },
+  { id: 'planner',  label: 'Planifier', icon: Map },
+  { id: 'carte',    label: 'Carte',     icon: MapPin },
+  { id: 'tacho',    label: 'Tachy',     icon: GaugeCircle },
+  { id: 'weekly',   label: 'Mon solde', icon: BarChart3 },
+  { id: 'settings', label: 'Réglages',  icon: Settings },
 ]
 
 export default function App() {
@@ -47,13 +48,20 @@ export default function App() {
       </header>
 
       {/* Main content */}
-      <main className="flex-1 max-w-2xl mx-auto w-full px-4 py-5 pb-24">
-        {page === 'planner' && <PlannerPage settings={settings} />}
-        {page === 'tacho' && <TachographPage />}
-        {page === 'weekly' && <WeeklyLogPage settings={settings} />}
-        {page === 'vehicles' && <VehiclesPage settings={settings} />}
-        {page === 'settings' && <SettingsPage settings={settings} onSave={refreshSettings} />}
-      </main>
+      {page === 'carte' ? (
+        /* Carte plein écran (pas de padding, hauteur maximale) */
+        <main style={{ flex: 1, position: 'relative', overflow: 'hidden', paddingBottom: 64 }}>
+          <MapPage />
+        </main>
+      ) : (
+        <main className="flex-1 max-w-2xl mx-auto w-full px-4 py-5 pb-24">
+          {page === 'planner'  && <PlannerPage settings={settings} />}
+          {page === 'tacho'    && <TachographPage />}
+          {page === 'weekly'   && <WeeklyLogPage settings={settings} />}
+          {page === 'vehicles' && <VehiclesPage settings={settings} />}
+          {page === 'settings' && <SettingsPage settings={settings} onSave={refreshSettings} />}
+        </main>
+      )}
 
       {/* Bottom navigation */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-bg-deep/95 backdrop-blur border-t border-bg-border">

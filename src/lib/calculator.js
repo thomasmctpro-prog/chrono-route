@@ -114,6 +114,10 @@ function buildMultiLegSegments({
   const S2        = rules.splitBreakPart2       // 30 min (2ème partie fractionnée)
   const MIN_REST  = useDerogations ? rules.minDailyRestReduced : rules.minDailyRest
 
+  // Pause fractionnée : seuil pour insérer le S1 (à 2h de conduite continue)
+  // Après S1, le conducteur peut conduire jusqu'à 4h30 TOTAL (S1 n'interrompt pas le compteur)
+  const S1_THRESHOLD = 120  // 2h → pause 15 min anticipée
+
   // Directive 2002/15/CE — temps de travail effectif
   const WORK_6H = 360   // après 6h de travail : pause 30 min
   const WORK_9H = 540   // après 9h de travail : pause 45 min
@@ -121,24 +125,45 @@ function buildMultiLegSegments({
   const segments = []
   // continuous : conduite continue depuis dernière VRAIE pause (Art. 7)
   // Les arrêts de travail (chargement, livraison…) NE resetent PAS ce compteur.
-  let continuous  = continuousMinutesSinceBreak
-  let dailyDriven = dailyDriveMinutes
-  let dayNumber   = 1
+  let continuous    = continuousMinutesSinceBreak
+  let dailyDriven   = dailyDriveMinutes
+  let dayNumber     = 1
   // work : travail cumulé depuis la dernière pause (conduite + activités pro)
-  let work    = Math.max(workMinutesSinceBreak, continuousMinutesSinceBreak)
-  let totalKm = 0  // km cumulés depuis le départ
+  let work          = Math.max(workMinutesSinceBreak, continuousMinutesSinceBreak)
+  let totalKm       = 0  // km cumulés depuis le départ
+  // splitS1Done : si la 1ère partie de la pause fractionnée a été faite dans ce cycle
+  let splitS1Done   = false
 
   // --- Helpers ---
 
-  /** Insère une pause conduite obligatoire (Art. 7 UE 561/2006). */
+  /**
+   * Insère la 1ère partie fractionnée (S1 = 15 min).
+   * NE réinitialise PAS continuous — le compteur 4h30 continue de tourner.
+   * La conduite AVANT + APRÈS S1 doit totaliser ≤ 4h30 avant S2.
+   */
+  function insertS1(atKm) {
+    segments.push({
+      type: 'break', duration: S1,
+      reason: `Pause fractionnée 1/2 — ${S1} min (Art. 7 UE 561/2006)`,
+      atKm: Math.round(atKm),
+      isSplitS1: true,
+    })
+    splitS1Done = true
+    // continuous et work INCHANGÉS (S1 n'interrompt pas le compteur de conduite cumulée)
+  }
+
+  /** Insère une pause conduite complète (Art. 7 UE 561/2006). */
   function insertDrivingBreak(atKm) {
     if (breakStrategy === 'split') {
-      // La pause 15 min TOUJOURS en premier, la 30 min ensuite — conformément à l'Art. 7
-      segments.push({
-        type: 'break', duration: S1,
-        reason: `Pause fractionnée 1/2 — ${S1} min (Art. 7 UE 561/2006)`,
-        atKm: Math.round(atKm),
-      })
+      if (!splitS1Done) {
+        // S1 non effectué : on insère les deux ensemble (réglementairement acceptable)
+        segments.push({
+          type: 'break', duration: S1,
+          reason: `Pause fractionnée 1/2 — ${S1} min (Art. 7 UE 561/2006)`,
+          atKm: Math.round(atKm),
+        })
+      }
+      // S2 = fin obligatoire du cycle
       segments.push({
         type: 'break', duration: S2,
         reason: `Pause fractionnée 2/2 — ${S2} min (Art. 7 UE 561/2006)`,
@@ -151,8 +176,9 @@ function buildMultiLegSegments({
         atKm: Math.round(atKm),
       })
     }
-    continuous = 0
-    work       = 0   // la pause conduite satisfait aussi la pause travail
+    continuous  = 0
+    work        = 0   // la pause conduite satisfait aussi la pause travail
+    splitS1Done = false
   }
 
   /** Insère une pause temps de travail (Directive 2002/15/CE). */
@@ -166,7 +192,7 @@ function buildMultiLegSegments({
     })
     work = 0
     // Une pause travail de 45 min satisfait aussi la pause conduite
-    if (dur >= 45) continuous = 0
+    if (dur >= 45) { continuous = 0; splitS1Done = false }
   }
 
   // --- Boucle sur les legs ---
@@ -206,6 +232,7 @@ function buildMultiLegSegments({
         dailyDriven = 0
         continuous  = 0
         work        = 0
+        splitS1Done = false
         continue
       }
 
@@ -213,7 +240,11 @@ function buildMultiLegSegments({
       const canCont  = MAX_CONT - continuous                     // marge conduite continue (Art. 7)
       const canDay   = maxDaily - dailyDriven                    // marge journalière
       const canWork  = work >= WORK_6H ? 0 : (WORK_6H - work)  // marge travail (Directive)
-      const canDrive = Math.min(canCont, canDay, canWork, legRemaining)
+      // Pause fractionnée : conduire jusqu'au seuil S1 si pas encore effectué
+      const canS1    = (breakStrategy === 'split' && !splitS1Done && continuous < S1_THRESHOLD)
+        ? (S1_THRESHOLD - continuous)
+        : Infinity
+      const canDrive = Math.min(canCont, canDay, canWork, canS1, legRemaining)
 
       if (canDrive <= 0) {
         // Doit insérer une pause avant de conduire
@@ -223,6 +254,8 @@ function buildMultiLegSegments({
           insertDrivingBreak(kmHere)
         } else if (work >= WORK_6H) {
           insertWorkBreak(kmHere)
+        } else if (breakStrategy === 'split' && !splitS1Done && continuous >= S1_THRESHOLD) {
+          insertS1(kmHere)
         } else {
           break  // garde-fou — ne devrait pas arriver
         }
@@ -251,10 +284,13 @@ function buildMultiLegSegments({
       const hasMore = legRemaining > 0 || legIdx < legs.length - 1
 
       if (continuous >= MAX_CONT && hasMore) {
-        // Pause conduite obligatoire (reset aussi le compteur travail)
+        // Pause conduite obligatoire à 4h30 (S2 si split S1 déjà fait, ou 45 min sinon)
         insertDrivingBreak(kmEnd)
+      } else if (breakStrategy === 'split' && !splitS1Done && continuous >= S1_THRESHOLD && hasMore) {
+        // Seuil S1 atteint : pause anticipée 15 min (conduite continue inchangée)
+        insertS1(kmEnd)
       } else if (work >= WORK_6H && hasMore) {
-        // Pause travail (Directive) — seulement si la pause conduite n'a pas déjà été insérée
+        // Pause travail Directive (seulement si pas de pause conduite déjà insérée)
         insertWorkBreak(kmEnd)
       }
     }

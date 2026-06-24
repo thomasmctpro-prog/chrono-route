@@ -1,12 +1,20 @@
-import React, { useState } from 'react'
-import { Save, Trash2, Info, AlertTriangle, Download, RotateCcw } from 'lucide-react'
+import React, { useState, useEffect } from 'react'
+import { Save, Trash2, Info, AlertTriangle, Download, Bell, BellOff } from 'lucide-react'
 import { getSettings, saveSettings, clearAllData, getTripHistory } from '../lib/storage.js'
+import { requestPermission, canNotify } from '../lib/notifications.js'
 import { RULES } from '../lib/regulations.js'
 
 export default function SettingsPage({ settings: initSettings, onSave }) {
   const [settings, setSettings] = useState(initSettings || getSettings())
   const [saved, setSaved] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
+  const [notifPerm, setNotifPerm] = useState(() =>
+    typeof Notification !== 'undefined' ? Notification.permission : 'denied'
+  )
+
+  useEffect(() => {
+    if (typeof Notification !== 'undefined') setNotifPerm(Notification.permission)
+  }, [])
 
   function update(key, value) {
     setSettings(s => ({ ...s, [key]: value }))
@@ -161,6 +169,64 @@ export default function SettingsPage({ settings: initSettings, onSave }) {
             onChange={v => update('showAlternatives', v)}
           />
         </div>
+      </div>
+
+      {/* Notifications */}
+      <div className="card p-4 space-y-4">
+        <h3 className="font-semibold text-bright text-sm flex items-center gap-2">
+          <Bell size={14} className="text-accent" />
+          Rappels de pause
+        </h3>
+
+        <p className="text-muted text-xs leading-relaxed">
+          Recevez une notification avant chaque pause réglementaire.
+          Les rappels sont programmés dès que vous calculez un trajet.
+        </p>
+
+        <ToggleSetting
+          label="Activer les rappels de pause"
+          description={
+            notifPerm === 'denied'
+              ? 'Notifications bloquées par le navigateur — modifiez les paramètres du site'
+              : notifPerm === 'default'
+                ? 'Une demande de permission sera affichée'
+                : 'Notifications autorisées ✓'
+          }
+          value={settings.notificationsEnabled ?? false}
+          onChange={async (v) => {
+            if (v && notifPerm !== 'granted') {
+              const perm = await requestPermission()
+              setNotifPerm(perm)
+              if (perm !== 'granted') return
+            }
+            update('notificationsEnabled', v)
+          }}
+        />
+
+        {(settings.notificationsEnabled) && (
+          <div>
+            <div className="flex justify-between mb-2">
+              <label className="label mb-0">Prévenir avant la pause</label>
+              <span className="text-accent font-semibold text-sm">{settings.notifLeadMinutes ?? 10} min</span>
+            </div>
+            <input
+              type="range"
+              min={5} max={30} step={5}
+              value={settings.notifLeadMinutes ?? 10}
+              onChange={e => update('notifLeadMinutes', +e.target.value)}
+              className="w-full accent-orange-500"
+            />
+            <div className="flex justify-between text-muted text-xs mt-1">
+              {[5, 10, 15, 20, 25, 30].map(v => (
+                <span key={v}>{v} min</span>
+              ))}
+            </div>
+            <p className="text-muted text-xs mt-2">
+              ℹ️ Les rappels fonctionnent tant que l'onglet est ouvert.
+              Pour des notifications sur écran de verrouillage, installez l'app (PWA).
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Bouton enregistrer */}
