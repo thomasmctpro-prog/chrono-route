@@ -58,7 +58,8 @@ const OVERPASS_URL = 'https://overpass-api.de/api/interpreter'
 
 async function fetchOverpass(bbox, query) {
   const [s, w, n, e] = bbox
-  const full = `[out:json][timeout:15];(${query.replace(/\{bbox\}/g, `${s},${w},${n},${e}`)});out center;`
+  // Overpass bbox syntax : (south,west,north,east) avec parenthèses
+  const full = `[out:json][timeout:15];(${query.replace(/\{bbox\}/g, `(${s},${w},${n},${e})`)});out center;`
   const res = await fetch(OVERPASS_URL, {
     method: 'POST',
     body: full,
@@ -229,8 +230,11 @@ export default function MapPage() {
     { key: 'ptac',      icon: '🚫', label: 'PTAC/HGV', color: '#7f1d1d', loading: loadP },
   ]
 
+  // Hauteur explicite : plein écran moins header (56px) et nav (64px)
+  const mapHeight = 'calc(100dvh - 56px - 64px)'
+
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div style={{ position: 'relative', width: '100%', height: mapHeight }}>
       {/* Carte */}
       <MapContainer
         center={center}

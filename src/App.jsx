@@ -49,8 +49,8 @@ export default function App() {
 
       {/* Main content */}
       {page === 'carte' ? (
-        /* Carte plein écran (pas de padding, hauteur maximale) */
-        <main style={{ flex: 1, position: 'relative', overflow: 'hidden', paddingBottom: 64 }}>
+        /* Carte plein écran — hauteur explicite (header 56px + nav 64px) */
+        <main style={{ position: 'relative', height: 'calc(100dvh - 56px - 64px)', overflow: 'hidden' }}>
           <MapPage />
         </main>
       ) : (
