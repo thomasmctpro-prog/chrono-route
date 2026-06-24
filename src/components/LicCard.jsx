@@ -48,6 +48,7 @@ function getSegmentRow(seg) {
     return { row: 3, color: COLORS.break_drive }
   }
   if (seg.type === 'overnight_rest') return { row: 3, color: COLORS.overnight_rest }
+  if (seg.type === 'wait') return { row: 2, color: '#0e7490' }  // disponibilité
   return null
 }
 
@@ -279,6 +280,7 @@ function DayFeuillet({ day, plateNumber }) {
           { color: COLORS.stop_work,      label: '⚒️ Travaux' },
           { color: COLORS.break_drive,    label: '☕ Pause cond.' },
           { color: COLORS.break_work,     label: '⏸️ Pause trav.' },
+          { color: '#0e7490',             label: '⏳ Attente' },
           { color: COLORS.overnight_rest, label: '🌙 Repos j.' },
         ].map(({ color, label }) => (
           <div key={label} className="flex items-center gap-1 text-xs text-muted">

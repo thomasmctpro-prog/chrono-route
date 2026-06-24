@@ -10,6 +10,7 @@ const SEGMENT_STYLES = {
   overnight_rest: { bar: 'bg-blue-600',    text: 'text-blue-400',  label: 'Repos journalier', dotColor: 'bg-blue-500' },
   buffer:         { bar: 'bg-muted/50',    text: 'text-muted',     label: 'Marge',            dotColor: 'bg-muted' },
   rest:           { bar: 'bg-blue-600',    text: 'text-blue-400',  label: 'Repos',            dotColor: 'bg-blue-500' },
+  wait:           { bar: 'bg-sky-700/70',  text: 'text-sky-300',   label: 'Attente créneau',  dotColor: 'bg-sky-500' },
 }
 
 const STOP_ICONS = {
@@ -214,7 +215,9 @@ function EventList({ events, compact = false }) {
                     ? `${stopInfo?.icon || '📍'} ${evt.reason || evt.label || 'Arrêt'}`
                     : evt.type === 'overnight_rest'
                       ? '🌙 ' + (evt.reason || 'Repos obligatoire')
-                      : evt.reason || style.label
+                      : evt.type === 'wait'
+                        ? evt.reason || '⏳ Attente créneau horaire'
+                        : evt.reason || style.label
                   }
                 </span>
                 {evt.type === 'break' && evt.atKm > 0 && (

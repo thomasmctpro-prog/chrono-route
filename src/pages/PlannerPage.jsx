@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  ArrowRight, Clock, ChevronDown, ChevronUp, Loader2, RefreshCw,
+  ArrowRight, Clock, Clock3, ChevronDown, ChevronUp, Loader2, RefreshCw,
   Zap, CalendarClock, ArrowRightLeft, AlertCircle, CheckCircle2,
   Info, Coffee, Lightbulb, BookCheck, Plus, X, GripVertical,
   Moon, Truck, MapPin, Package, Fuel, Wrench,
@@ -28,8 +28,88 @@ import {
 const REC_ICONS = { success: CheckCircle2, warning: AlertCircle, error: AlertCircle, info: Lightbulb }
 const REC_COLORS = { success: 'text-drive', warning: 'text-pause', error: 'text-danger', info: 'text-blue-400' }
 
+const DEFAULT_TIME_WINDOW = { enabled: false, mode: 'exact', exact: '', from: '', to: '' }
+
 function newStop() {
-  return { id: `s_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, place: null, type: 'delivery', duration: 20 }
+  return {
+    id: `s_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    place: null, type: 'delivery', duration: 20,
+    timeWindow: { ...DEFAULT_TIME_WINDOW },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Composant créneau horaire
+// ---------------------------------------------------------------------------
+
+/**
+ * Sélecteur compact de contrainte horaire (heure exacte ou fourchette).
+ * tw = { enabled, mode: 'exact'|'window', exact: 'HH:MM', from: 'HH:MM', to: 'HH:MM' }
+ */
+function TimeWindowPicker({ tw, onChange }) {
+  const val = tw || { enabled: false, mode: 'exact', exact: '', from: '', to: '' }
+
+  if (!val.enabled) {
+    return (
+      <button
+        type="button"
+        onClick={() => onChange({ ...val, enabled: true })}
+        className="flex items-center gap-1 text-xs text-muted/70 hover:text-blue-400 transition-colors mt-0.5"
+      >
+        <Clock3 size={10} />
+        + Contrainte horaire
+      </button>
+    )
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 mt-1 pl-0.5">
+      <Clock3 size={11} className="text-blue-400 flex-shrink-0" />
+      {/* Mode */}
+      <select
+        value={val.mode}
+        onChange={e => onChange({ ...val, mode: e.target.value })}
+        className="input-field text-xs py-0.5 pr-5 flex-shrink-0"
+        style={{ width: 'auto', minWidth: 104 }}
+      >
+        <option value="exact">Heure exacte</option>
+        <option value="window">Créneau</option>
+      </select>
+      {/* Saisie heure */}
+      {val.mode === 'exact' ? (
+        <input
+          type="time"
+          value={val.exact}
+          onChange={e => onChange({ ...val, exact: e.target.value })}
+          className="input-field text-xs py-0.5 w-24 flex-shrink-0"
+        />
+      ) : (
+        <>
+          <input
+            type="time"
+            value={val.from}
+            onChange={e => onChange({ ...val, from: e.target.value })}
+            className="input-field text-xs py-0.5 w-20 flex-shrink-0"
+          />
+          <span className="text-muted text-xs">→</span>
+          <input
+            type="time"
+            value={val.to}
+            onChange={e => onChange({ ...val, to: e.target.value })}
+            className="input-field text-xs py-0.5 w-20 flex-shrink-0"
+          />
+        </>
+      )}
+      <button
+        type="button"
+        onClick={() => onChange({ ...val, enabled: false })}
+        className="btn-ghost p-0.5 text-danger/60 hover:text-danger flex-shrink-0"
+        title="Supprimer la contrainte"
+      >
+        <X size={11} />
+      </button>
+    </div>
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -52,8 +132,8 @@ export default function PlannerPage({ settings }) {
   const [dest, setDest] = useState(savedForm?.dest || null)
   const [stops, setStops] = useState(savedForm?.stops || [])
   // Activités au départ / à l'arrivée
-  const [depStop, setDepStop] = useState(savedForm?.depStop || { enabled: false, type: 'loading', duration: 45 })
-  const [arrStop, setArrStop] = useState(savedForm?.arrStop || { enabled: false, type: 'delivery', duration: 30 })
+  const [depStop, setDepStop] = useState(savedForm?.depStop || { enabled: false, type: 'loading', duration: 45, timeWindow: { ...DEFAULT_TIME_WINDOW } })
+  const [arrStop, setArrStop] = useState(savedForm?.arrStop || { enabled: false, type: 'delivery', duration: 30, timeWindow: { ...DEFAULT_TIME_WINDOW } })
   const [mode, setMode] = useState(savedForm?.mode || 'arrival')
   const [targetDate, setTargetDate] = useState(savedForm?.targetDate || todayStr())
   const [targetTimeStr, setTargetTimeStr] = useState(savedForm?.targetTimeStr || '08:00')
@@ -134,16 +214,19 @@ export default function PlannerPage({ settings }) {
           stopDurationMinutes: i < stops.length ? (stops[i].duration || 0) : 0,
           stopLabel:           i < stops.length ? (stops[i].place?.shortLabel || `Arrêt ${i + 1}`) : '',
           stopType:            i < stops.length ? stops[i].type : 'other',
+          stopTimeWindow:      i < stops.length ? (stops[i].timeWindow || null) : null,
           // Activité au départ (premier leg) et à l'arrivée (dernier leg)
           departureStop: isFirst && depStop.enabled ? {
             durationMinutes: depStop.duration,
             type:  depStop.type,
             label: origin.shortLabel,
+            timeWindow: depStop.timeWindow || null,
           } : null,
           arrivalStop: isLast && arrStop.enabled ? {
             durationMinutes: arrStop.duration,
             type:  arrStop.type,
             label: dest.shortLabel,
+            timeWindow: arrStop.timeWindow || null,
           } : null,
           routeSource:  legRes.source,
           routeWarning: legRes.warning,
@@ -294,30 +377,36 @@ export default function PlannerPage({ settings }) {
                 />
                 {/* Activité au départ */}
                 {depStop.enabled ? (
-                  <div className="flex gap-2 items-center pl-1">
-                    <select
-                      value={depStop.type}
-                      onChange={e => {
-                        const t = e.target.value
-                        const def = STOP_TYPES.find(s => s.id === t)?.defaultDuration || 30
-                        setDepStop(s => ({ ...s, type: t, duration: def }))
-                        setResult(null)
-                      }}
-                      className="input-field text-xs flex-1"
-                    >
-                      {STOP_TYPES.map(s => <option key={s.id} value={s.id}>{s.icon} {s.label}</option>)}
-                    </select>
-                    <input
-                      type="number" min={5} max={480} step={5}
-                      value={depStop.duration}
-                      onChange={e => { setDepStop(s => ({ ...s, duration: +e.target.value })); setResult(null) }}
-                      className="input-field w-16 text-xs text-center"
+                  <div className="pl-1 space-y-1">
+                    <div className="flex gap-2 items-center">
+                      <select
+                        value={depStop.type}
+                        onChange={e => {
+                          const t = e.target.value
+                          const def = STOP_TYPES.find(s => s.id === t)?.defaultDuration || 30
+                          setDepStop(s => ({ ...s, type: t, duration: def }))
+                          setResult(null)
+                        }}
+                        className="input-field text-xs flex-1"
+                      >
+                        {STOP_TYPES.map(s => <option key={s.id} value={s.id}>{s.icon} {s.label}</option>)}
+                      </select>
+                      <input
+                        type="number" min={5} max={480} step={5}
+                        value={depStop.duration}
+                        onChange={e => { setDepStop(s => ({ ...s, duration: +e.target.value })); setResult(null) }}
+                        className="input-field w-16 text-xs text-center"
+                      />
+                      <span className="text-muted text-xs flex-shrink-0">min</span>
+                      <button onClick={() => { setDepStop(s => ({ ...s, enabled: false })); setResult(null) }}
+                        className="btn-ghost p-1 text-danger/60 hover:text-danger flex-shrink-0">
+                        <X size={13} />
+                      </button>
+                    </div>
+                    <TimeWindowPicker
+                      tw={depStop.timeWindow}
+                      onChange={tw => { setDepStop(s => ({ ...s, timeWindow: tw })); setResult(null) }}
                     />
-                    <span className="text-muted text-xs flex-shrink-0">min</span>
-                    <button onClick={() => { setDepStop(s => ({ ...s, enabled: false })); setResult(null) }}
-                      className="btn-ghost p-1 text-danger/60 hover:text-danger flex-shrink-0">
-                      <X size={13} />
-                    </button>
                   </div>
                 ) : (
                   <button
@@ -378,6 +467,11 @@ export default function PlannerPage({ settings }) {
                           <X size={14} />
                         </button>
                       </div>
+                      {/* Créneau horaire pour cet arrêt */}
+                      <TimeWindowPicker
+                        tw={stop.timeWindow}
+                        onChange={tw => { updateStop(stop.id, { timeWindow: tw }); setResult(null) }}
+                      />
                     </div>
                   </div>
                 </div>
@@ -398,30 +492,36 @@ export default function PlannerPage({ settings }) {
                 />
                 {/* Activité à l'arrivée */}
                 {arrStop.enabled ? (
-                  <div className="flex gap-2 items-center pl-1">
-                    <select
-                      value={arrStop.type}
-                      onChange={e => {
-                        const t = e.target.value
-                        const def = STOP_TYPES.find(s => s.id === t)?.defaultDuration || 20
-                        setArrStop(s => ({ ...s, type: t, duration: def }))
-                        setResult(null)
-                      }}
-                      className="input-field text-xs flex-1"
-                    >
-                      {STOP_TYPES.map(s => <option key={s.id} value={s.id}>{s.icon} {s.label}</option>)}
-                    </select>
-                    <input
-                      type="number" min={5} max={480} step={5}
-                      value={arrStop.duration}
-                      onChange={e => { setArrStop(s => ({ ...s, duration: +e.target.value })); setResult(null) }}
-                      className="input-field w-16 text-xs text-center"
+                  <div className="pl-1 space-y-1">
+                    <div className="flex gap-2 items-center">
+                      <select
+                        value={arrStop.type}
+                        onChange={e => {
+                          const t = e.target.value
+                          const def = STOP_TYPES.find(s => s.id === t)?.defaultDuration || 20
+                          setArrStop(s => ({ ...s, type: t, duration: def }))
+                          setResult(null)
+                        }}
+                        className="input-field text-xs flex-1"
+                      >
+                        {STOP_TYPES.map(s => <option key={s.id} value={s.id}>{s.icon} {s.label}</option>)}
+                      </select>
+                      <input
+                        type="number" min={5} max={480} step={5}
+                        value={arrStop.duration}
+                        onChange={e => { setArrStop(s => ({ ...s, duration: +e.target.value })); setResult(null) }}
+                        className="input-field w-16 text-xs text-center"
+                      />
+                      <span className="text-muted text-xs flex-shrink-0">min</span>
+                      <button onClick={() => { setArrStop(s => ({ ...s, enabled: false })); setResult(null) }}
+                        className="btn-ghost p-1 text-danger/60 hover:text-danger flex-shrink-0">
+                        <X size={13} />
+                      </button>
+                    </div>
+                    <TimeWindowPicker
+                      tw={arrStop.timeWindow}
+                      onChange={tw => { setArrStop(s => ({ ...s, timeWindow: tw })); setResult(null) }}
                     />
-                    <span className="text-muted text-xs flex-shrink-0">min</span>
-                    <button onClick={() => { setArrStop(s => ({ ...s, enabled: false })); setResult(null) }}
-                      className="btn-ghost p-1 text-danger/60 hover:text-danger flex-shrink-0">
-                      <X size={13} />
-                    </button>
                   </div>
                 ) : (
                   <button

@@ -55,7 +55,7 @@ export function planMultiLegTrip({
   const totalRestMinutes  = segments.filter(s => s.type === 'overnight_rest').reduce((s, seg) => s + seg.duration, 0)
   const totalTripMinutes  = totalDriveMinutes + totalBreakMinutes + totalStopMinutes + totalRestMinutes
 
-  // --- 3. Horaires absolus ---
+  // --- 3. Horaires absolus (provisoires — sans créneaux) ---
   let departure, arrival
   const totalWithBuffer = totalTripMinutes + bufferMinutes
 
@@ -70,27 +70,53 @@ export function planMultiLegTrip({
     arrival   = new Date(departure.getTime() + totalWithBuffer * 60_000)
   }
 
+  // --- 3b. Injection des attentes pour créneaux horaires ---
+  // Passe 1 : calcul provisoire depuis la première estimation de départ
+  let { segments: segs1, totalWaitMinutes: wait1, timeWindowViolations } =
+    injectTimeWindowWaits(segments, departure, legs)
+
+  // En mode arrivée : le départ recule d'autant que les attentes ajoutées
+  // Passe 2 : recalcul avec le départ corrigé pour plus de précision
+  let finalSegments = segs1
+  let totalWaitMinutes = wait1
+
+  if (mode === 'arrival' && wait1 > 0) {
+    departure = new Date(departure.getTime() - wait1 * 60_000)
+    const pass2 = injectTimeWindowWaits(segments, departure, legs)
+    finalSegments       = pass2.segments
+    totalWaitMinutes    = pass2.totalWaitMinutes
+    timeWindowViolations = pass2.timeWindowViolations
+  } else if (mode === 'departure' && wait1 > 0) {
+    // Mode départ : l'arrivée est décalée en avant
+    arrival = new Date(departure.getTime() + (totalTripMinutes + totalWaitMinutes + bufferMinutes) * 60_000)
+  }
+
   // --- 4. Timeline absolue ---
-  const timeline = buildTimeline(segments, departure)
+  const timeline = buildTimeline(finalSegments, departure)
 
   // --- 5. Résumé par jour ---
   const days = buildDaySummaries(timeline)
 
   // --- 6. Conformité ---
   const compliance = analyzeCompliance({
-    segments, rules, dailyDriveMinutes, weeklyDriveMinutes,
+    segments: finalSegments, rules, dailyDriveMinutes, weeklyDriveMinutes,
     biweeklyDriveMinutes, extendedDaysThisWeek, useDerogations, maxDaily,
+    timeWindowViolations,
   })
 
   // --- 7. Recommandations ---
-  const recommendations = generateRecommendations(compliance, rules, segments, driverState, days)
+  const recommendations = generateRecommendations(compliance, rules, finalSegments, driverState, days)
+
+  const totalWithWait = totalTripMinutes + totalWaitMinutes + bufferMinutes
 
   return {
     departure, arrival,
     totalDriveMinutes, totalBreakMinutes, totalStopMinutes, totalRestMinutes,
-    totalTripMinutes, totalWithBuffer,
-    segments, timeline, days, compliance, recommendations, rules,
+    totalTripMinutes, totalWaitMinutes,
+    totalWithBuffer: totalWithWait,
+    segments: finalSegments, timeline, days, compliance, recommendations, rules,
     isMultiDay: days.length > 1,
+    timeWindowViolations,
   }
 }
 
@@ -307,6 +333,7 @@ function buildMultiLegSegments({
         stopType: leg.stopType  || 'other',
         reason:   `${STOP_TYPE_LABELS[leg.stopType] || 'Arrêt'} — ${leg.stopLabel || ''}`,
         atKm: Math.round(totalKm),
+        legIndex: legIdx,  // pour la correspondance avec les créneaux horaires
       })
 
       const isRest = leg.stopType === 'rest_stop'
@@ -347,6 +374,98 @@ function buildMultiLegSegments({
   }
 
   return segments
+}
+
+// ---------------------------------------------------------------------------
+// Créneaux horaires — injection des attentes
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse une chaîne "HH:MM" sur le même jour calendaire que referenceDate.
+ * Si l'heure calculée est plus de 30 min dans le passé → avance d'un jour.
+ */
+function parseTimeWindowDate(timeStr, referenceDate) {
+  if (!timeStr || !timeStr.includes(':')) return null
+  const [h, m] = timeStr.split(':').map(Number)
+  if (isNaN(h) || isNaN(m)) return null
+  const d = new Date(referenceDate)
+  d.setHours(h, m, 0, 0)
+  // Si le créneau est clairement passé (ex : référence=14h, créneau=08h) → lendemain
+  if (d.getTime() < referenceDate.getTime() - 30 * 60_000) {
+    d.setDate(d.getDate() + 1)
+  }
+  return d
+}
+
+/**
+ * Injecte des segments « wait » avant chaque stop dont le créneau horaire
+ * impose d'attendre. Retourne aussi la liste des violations (arrivée trop tardive).
+ *
+ * @param {Array}  segments      - segments bruts (sans attentes)
+ * @param {Date}   departureTime - heure de départ provisoire
+ * @param {Array}  legs          - legs avec stopTimeWindow, departureStop.timeWindow, arrivalStop.timeWindow
+ */
+function injectTimeWindowWaits(segments, departureTime, legs) {
+  const result    = []
+  const violations = []
+  let elapsed = 0   // minutes écoulées depuis le départ
+
+  for (const seg of segments) {
+    if (seg.type === 'stop') {
+      // Retrouver le créneau correspondant à cet arrêt
+      let tw = null
+      if (seg.isDeparture) {
+        tw = legs[0]?.departureStop?.timeWindow
+      } else if (seg.isArrival) {
+        tw = legs[legs.length - 1]?.arrivalStop?.timeWindow
+      } else if (seg.legIndex !== undefined) {
+        tw = legs[seg.legIndex]?.stopTimeWindow
+      }
+
+      if (tw?.enabled && (tw.exact || tw.from)) {
+        const arrivalDate = new Date(departureTime.getTime() + elapsed * 60_000)
+
+        const openDate  = parseTimeWindowDate(tw.mode === 'exact' ? tw.exact : tw.from, arrivalDate)
+        const closeDate = tw.mode === 'window' && tw.to
+          ? parseTimeWindowDate(tw.to, arrivalDate)
+          : openDate   // pour 'exact', on tolère 1 min après
+
+        if (openDate && arrivalDate < openDate) {
+          // Trop tôt — attendre l'ouverture du créneau
+          const waitMin = Math.max(1, Math.round((openDate - arrivalDate) / 60_000))
+          result.push({
+            type: 'wait',
+            duration: waitMin,
+            reason: tw.mode === 'exact'
+              ? `⏳ Attente créneau — heure fixée à ${tw.exact}`
+              : `⏳ Attente ouverture créneau ${tw.from}–${tw.to}`,
+            isTimeWindowWait: true,
+            atKm: seg.atKm || 0,
+            windowInfo: { ...tw },
+          })
+          elapsed += waitMin
+        } else if (closeDate && arrivalDate > new Date(closeDate.getTime() + 60_000)) {
+          // Trop tard — violation de créneau
+          violations.push({
+            stopLabel: seg.label || seg.reason?.split(' — ')[0] || 'Arrêt',
+            windowStr: tw.mode === 'exact'
+              ? `exactement à ${tw.exact}`
+              : `entre ${tw.from} et ${tw.to}`,
+            lateBy: Math.round((arrivalDate - closeDate) / 60_000),
+          })
+        }
+      }
+    }
+
+    result.push(seg)
+    elapsed += seg.duration
+  }
+
+  const totalWaitMinutes = result
+    .filter(s => s.type === 'wait')
+    .reduce((s, x) => s + x.duration, 0)
+
+  return { segments: result, totalWaitMinutes, timeWindowViolations: violations }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +527,7 @@ function buildDaySummaries(timeline) {
 function analyzeCompliance({
   segments, rules, dailyDriveMinutes, weeklyDriveMinutes,
   biweeklyDriveMinutes, extendedDaysThisWeek, useDerogations, maxDaily,
+  timeWindowViolations = [],
 }) {
   const tripDrive    = segments.filter(s => s.type === 'drive').reduce((s, seg) => s + seg.duration, 0)
   const newWeekly    = weeklyDriveMinutes + tripDrive
@@ -464,12 +584,22 @@ function analyzeCompliance({
     infosReglementaires.push(`${workBreakCount} pause${workBreakCount > 1 ? 's' : ''} temps de travail (Directive 2002/15/CE)`)
   }
 
+  // Violations de créneaux horaires
+  for (const v of timeWindowViolations) {
+    violations.push({
+      severity: 'warning',
+      message:  `Créneau manqué — ${v.stopLabel} : attendu ${v.windowStr}, retard de ${v.lateBy} min`,
+      article:  'Contrainte client',
+    })
+  }
+
   return {
     isCompliant: violations.length === 0,
     violations, warnings, derogationsUsed, infosReglementaires,
     tripDrive, newWeeklyTotal: newWeekly, newBiweeklyTotal: newBiweekly,
     remainingWeeklyDrive:    Math.max(0, rules.maxWeeklyDrive    - newWeekly),
     remainingBiweeklyDrive:  Math.max(0, rules.maxBiweeklyDrive  - newBiweekly),
+    timeWindowViolations,
   }
 }
 
