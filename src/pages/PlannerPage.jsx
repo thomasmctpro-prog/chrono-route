@@ -4,7 +4,7 @@ import {
   Zap, CalendarClock, ArrowRightLeft, AlertCircle, CheckCircle2,
   Info, Coffee, Lightbulb, BookCheck, Plus, X, GripVertical,
   Moon, Truck, MapPin, Package, Fuel, Wrench,
-  BarChart2, PieChart,
+  BarChart2, PieChart, BookOpen,
 } from 'lucide-react'
 import AddressInput from '../components/AddressInput.jsx'
 import TripTimeline from '../components/TripTimeline.jsx'
@@ -12,6 +12,7 @@ import TripPieChart from '../components/TripPieChart.jsx'
 import ComplianceBadges from '../components/ComplianceBadges.jsx'
 import MapView from '../components/MapView.jsx'
 import FuelEstimate from '../components/FuelEstimate.jsx'
+import LicCard from '../components/LicCard.jsx'
 import { planMultiLegTrip, STOP_TYPES } from '../lib/calculator.js'
 import { getRouteDuration } from '../lib/api.js'
 import {
@@ -49,6 +50,9 @@ export default function PlannerPage({ settings }) {
   const [origin, setOrigin] = useState(savedForm?.origin || null)
   const [dest, setDest] = useState(savedForm?.dest || null)
   const [stops, setStops] = useState(savedForm?.stops || [])
+  // Activités au départ / à l'arrivée
+  const [depStop, setDepStop] = useState(savedForm?.depStop || { enabled: false, type: 'loading', duration: 45 })
+  const [arrStop, setArrStop] = useState(savedForm?.arrStop || { enabled: false, type: 'delivery', duration: 30 })
   const [mode, setMode] = useState(savedForm?.mode || 'arrival')
   const [targetDate, setTargetDate] = useState(savedForm?.targetDate || todayStr())
   const [targetTimeStr, setTargetTimeStr] = useState(savedForm?.targetTimeStr || '08:00')
@@ -70,10 +74,10 @@ export default function PlannerPage({ settings }) {
   useEffect(() => {
     clearTimeout(saveFormRef.current)
     saveFormRef.current = setTimeout(() => {
-      savePlannerForm({ origin, dest, stops, mode, targetDate, targetTimeStr, vehicleTypeId, buffer, breakStrategy, useDerogations })
+      savePlannerForm({ origin, dest, stops, depStop, arrStop, mode, targetDate, targetTimeStr, vehicleTypeId, buffer, breakStrategy, useDerogations })
     }, 500)
     return () => clearTimeout(saveFormRef.current)
-  }, [origin, dest, stops, mode, targetDate, targetTimeStr, vehicleTypeId, buffer, breakStrategy, useDerogations])
+  }, [origin, dest, stops, depStop, arrStop, mode, targetDate, targetTimeStr, vehicleTypeId, buffer, breakStrategy, useDerogations])
 
   // --- Stats conducteur ---
   const weekStats = getWeeklyStats()
@@ -119,15 +123,30 @@ export default function PlannerPage({ settings }) {
       )
 
       // Construire les legs avec le facteur véhicule
-      const legs = legResults.map((legRes, i) => ({
-        driveMinutes: Math.round(legRes.durationMinutes / factor),
-        distanceKm: legRes.distanceKm,
-        stopDurationMinutes: i < stops.length ? (stops[i].duration || 0) : 0,
-        stopLabel: i < stops.length ? (stops[i].place?.shortLabel || `Arrêt ${i + 1}`) : '',
-        stopType: i < stops.length ? stops[i].type : 'other',
-        routeSource: legRes.source,
-        routeWarning: legRes.warning,
-      }))
+      const legs = legResults.map((legRes, i) => {
+        const isFirst = i === 0
+        const isLast  = i === legResults.length - 1
+        return {
+          driveMinutes:        Math.round(legRes.durationMinutes / factor),
+          distanceKm:          legRes.distanceKm,
+          stopDurationMinutes: i < stops.length ? (stops[i].duration || 0) : 0,
+          stopLabel:           i < stops.length ? (stops[i].place?.shortLabel || `Arrêt ${i + 1}`) : '',
+          stopType:            i < stops.length ? stops[i].type : 'other',
+          // Activité au départ (premier leg) et à l'arrivée (dernier leg)
+          departureStop: isFirst && depStop.enabled ? {
+            durationMinutes: depStop.duration,
+            type:  depStop.type,
+            label: origin.shortLabel,
+          } : null,
+          arrivalStop: isLast && arrStop.enabled ? {
+            durationMinutes: arrStop.duration,
+            type:  arrStop.type,
+            label: dest.shortLabel,
+          } : null,
+          routeSource:  legRes.source,
+          routeWarning: legRes.warning,
+        }
+      })
 
       const totalDistanceKm = Math.round(legs.reduce((s, l) => s + (l.distanceKm || 0), 0))
       const totalRawDrive = legs.reduce((s, l) => s + l.driveMinutes, 0)
@@ -160,6 +179,7 @@ export default function PlannerPage({ settings }) {
           weeklyDriveMinutes: weekStats.totalDriveMinutes,
           biweeklyDriveMinutes: weekStats.biweeklyDriveMinutes,
           extendedDaysThisWeek: weekStats.extendedDaysCount,
+          workMinutesSinceBreak: 0,
         },
       })
 
@@ -241,17 +261,53 @@ export default function PlannerPage({ settings }) {
           <label className="label">Itinéraire</label>
           <div className="space-y-1.5">
             {/* Départ */}
-            <div className="flex items-center gap-2">
+            <div className="flex items-start gap-2">
               <div className="flex flex-col items-center gap-0.5 self-stretch pt-2">
                 <div className="w-3 h-3 rounded-full bg-drive border-2 border-bg-base flex-shrink-0" />
-                {(stops.length > 0) && <div className="w-px flex-1 bg-bg-border min-h-[12px]" />}
+                {(stops.length > 0 || depStop.enabled) && <div className="w-px flex-1 bg-bg-border min-h-[12px]" />}
               </div>
-              <div className="flex-1">
+              <div className="flex-1 space-y-1.5">
                 <AddressInput
                   value={origin}
                   onChange={v => { setOrigin(v); setResult(null) }}
                   placeholder="Départ…"
                 />
+                {/* Activité au départ */}
+                {depStop.enabled ? (
+                  <div className="flex gap-2 items-center pl-1">
+                    <select
+                      value={depStop.type}
+                      onChange={e => {
+                        const t = e.target.value
+                        const def = STOP_TYPES.find(s => s.id === t)?.defaultDuration || 30
+                        setDepStop(s => ({ ...s, type: t, duration: def }))
+                        setResult(null)
+                      }}
+                      className="input-field text-xs flex-1"
+                    >
+                      {STOP_TYPES.map(s => <option key={s.id} value={s.id}>{s.icon} {s.label}</option>)}
+                    </select>
+                    <input
+                      type="number" min={5} max={480} step={5}
+                      value={depStop.duration}
+                      onChange={e => { setDepStop(s => ({ ...s, duration: +e.target.value })); setResult(null) }}
+                      className="input-field w-16 text-xs text-center"
+                    />
+                    <span className="text-muted text-xs flex-shrink-0">min</span>
+                    <button onClick={() => { setDepStop(s => ({ ...s, enabled: false })); setResult(null) }}
+                      className="btn-ghost p-1 text-danger/60 hover:text-danger flex-shrink-0">
+                      <X size={13} />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => { setDepStop(s => ({ ...s, enabled: true })); setResult(null) }}
+                    className="pl-1 text-xs text-muted hover:text-accent flex items-center gap-1 transition-colors"
+                  >
+                    <Plus size={11} />
+                    Activité au départ (chargement…)
+                  </button>
+                )}
               </div>
             </div>
 
@@ -309,17 +365,53 @@ export default function PlannerPage({ settings }) {
             })}
 
             {/* Destination */}
-            <div className="flex items-center gap-2">
+            <div className="flex items-start gap-2">
               <div className="flex flex-col items-center gap-0.5 self-stretch pt-1">
                 {(stops.length > 0) && <div className="w-px flex-none bg-bg-border h-1.5 ml-1" />}
                 <div className="w-3 h-3 rounded-full bg-danger border-2 border-bg-base flex-shrink-0" />
               </div>
-              <div className="flex-1">
+              <div className="flex-1 space-y-1.5">
                 <AddressInput
                   value={dest}
                   onChange={v => { setDest(v); setResult(null) }}
                   placeholder="Destination…"
                 />
+                {/* Activité à l'arrivée */}
+                {arrStop.enabled ? (
+                  <div className="flex gap-2 items-center pl-1">
+                    <select
+                      value={arrStop.type}
+                      onChange={e => {
+                        const t = e.target.value
+                        const def = STOP_TYPES.find(s => s.id === t)?.defaultDuration || 20
+                        setArrStop(s => ({ ...s, type: t, duration: def }))
+                        setResult(null)
+                      }}
+                      className="input-field text-xs flex-1"
+                    >
+                      {STOP_TYPES.map(s => <option key={s.id} value={s.id}>{s.icon} {s.label}</option>)}
+                    </select>
+                    <input
+                      type="number" min={5} max={480} step={5}
+                      value={arrStop.duration}
+                      onChange={e => { setArrStop(s => ({ ...s, duration: +e.target.value })); setResult(null) }}
+                      className="input-field w-16 text-xs text-center"
+                    />
+                    <span className="text-muted text-xs flex-shrink-0">min</span>
+                    <button onClick={() => { setArrStop(s => ({ ...s, enabled: false })); setResult(null) }}
+                      className="btn-ghost p-1 text-danger/60 hover:text-danger flex-shrink-0">
+                      <X size={13} />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => { setArrStop(s => ({ ...s, enabled: true })); setResult(null) }}
+                    className="pl-1 text-xs text-muted hover:text-accent flex items-center gap-1 transition-colors"
+                  >
+                    <Plus size={11} />
+                    Activité à l'arrivée (déchargement…)
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -537,6 +629,28 @@ function TripResult({ result, mode, buffer, settings }) {
           <span className="text-bright font-medium">{destLabel}</span>
         </div>
 
+        {/* Distances par étape */}
+        {legs && legs.length > 0 && (
+          <div className="bg-bg-elevated rounded-lg px-3 py-2.5 mb-4 space-y-1.5">
+            <div className="text-xs text-muted font-medium">📏 Distances par étape</div>
+            {legs.map((leg, i) => (
+              <div key={i} className="flex items-center justify-between text-xs">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-sub truncate max-w-[90px]">{waypoints[i]?.shortLabel || `Pt ${i + 1}`}</span>
+                  <ArrowRight size={9} className="text-muted flex-shrink-0" />
+                  <span className="text-sub truncate max-w-[90px]">{waypoints[i + 1]?.shortLabel || `Pt ${i + 2}`}</span>
+                </div>
+                <div className="flex items-center gap-3 flex-shrink-0 ml-2">
+                  <span className="font-mono font-semibold text-text">
+                    {leg.distanceKm ? `${Math.round(leg.distanceKm)} km` : '—'}
+                  </span>
+                  <span className="font-mono text-muted">{formatDuration(leg.driveMinutes)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Horaires */}
         <div className="grid grid-cols-2 gap-4 mb-4">
           <TimeCard
@@ -710,6 +824,9 @@ function TripResult({ result, mode, buffer, settings }) {
           })}
         </div>
       )}
+
+      {/* Livret Individuel de Contrôle */}
+      <LicCard days={days} />
     </div>
   )
 }

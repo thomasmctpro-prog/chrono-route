@@ -6,12 +6,14 @@ import { getRules } from './regulations.js'
 
 /**
  * @param {object} params
- * @param {Array}  params.legs              - [{driveMinutes, stopLabel, stopDurationMinutes, stopType}]
- *                                            Le dernier leg n'a pas de stop (c'est la destination finale)
+ * @param {Array}  params.legs  — [{driveMinutes, distanceKm, stopLabel, stopDurationMinutes, stopType,
+ *                                   departureStop?, arrivalStop?}]
+ *   departureStop / arrivalStop : { durationMinutes, type, label }
+ *   (premier / dernier leg uniquement)
  * @param {string} params.vehicleTypeId
  * @param {'arrival'|'departure'} params.mode
  * @param {Date}   params.targetTime
- * @param {number} params.bufferMinutes     - 0..180
+ * @param {number} params.bufferMinutes
  * @param {'single'|'split'} params.breakStrategy
  * @param {boolean} params.useDerogations
  * @param {object} params.driverState
@@ -34,35 +36,24 @@ export function planMultiLegTrip({
     biweeklyDriveMinutes = 0,
     extendedDaysThisWeek = 0,
     reducedRestDays = 0,
+    workMinutesSinceBreak = 0,
   } = driverState
 
   const maxDaily = useDerogations ? rules.maxDailyDriveExtended : rules.maxDailyDrive
 
-  // --- 1. Construire tous les segments (conduite + arrêts + repos inter-jours) ---
+  // --- 1. Construire tous les segments ---
   const segments = buildMultiLegSegments({
-    legs,
-    rules,
-    maxDaily,
-    continuousMinutesSinceBreak,
-    dailyDriveMinutes,
-    breakStrategy,
-    useDerogations,
+    legs, rules, maxDaily,
+    continuousMinutesSinceBreak, dailyDriveMinutes,
+    breakStrategy, useDerogations, workMinutesSinceBreak,
   })
 
-  // --- 2. Calculs de synthèse ---
-  const totalDriveMinutes = segments
-    .filter(s => s.type === 'drive')
-    .reduce((s, seg) => s + seg.duration, 0)
-  const totalBreakMinutes = segments
-    .filter(s => s.type === 'break')
-    .reduce((s, seg) => s + seg.duration, 0)
-  const totalStopMinutes = segments
-    .filter(s => s.type === 'stop')
-    .reduce((s, seg) => s + seg.duration, 0)
-  const totalRestMinutes = segments
-    .filter(s => s.type === 'overnight_rest')
-    .reduce((s, seg) => s + seg.duration, 0)
-  const totalTripMinutes = totalDriveMinutes + totalBreakMinutes + totalStopMinutes + totalRestMinutes
+  // --- 2. Synthèse ---
+  const totalDriveMinutes = segments.filter(s => s.type === 'drive').reduce((s, seg) => s + seg.duration, 0)
+  const totalBreakMinutes = segments.filter(s => s.type === 'break').reduce((s, seg) => s + seg.duration, 0)
+  const totalStopMinutes  = segments.filter(s => s.type === 'stop').reduce((s, seg) => s + seg.duration, 0)
+  const totalRestMinutes  = segments.filter(s => s.type === 'overnight_rest').reduce((s, seg) => s + seg.duration, 0)
+  const totalTripMinutes  = totalDriveMinutes + totalBreakMinutes + totalStopMinutes + totalRestMinutes
 
   // --- 3. Horaires absolus ---
   let departure, arrival
@@ -70,57 +61,41 @@ export function planMultiLegTrip({
 
   if (!targetTime) {
     departure = new Date()
-    arrival = new Date(departure.getTime() + totalWithBuffer * 60_000)
+    arrival   = new Date(departure.getTime() + totalWithBuffer * 60_000)
   } else if (mode === 'arrival') {
-    arrival = new Date(targetTime)
+    arrival   = new Date(targetTime)
     departure = new Date(arrival.getTime() - totalWithBuffer * 60_000)
   } else {
     departure = new Date(targetTime)
-    arrival = new Date(departure.getTime() + totalWithBuffer * 60_000)
+    arrival   = new Date(departure.getTime() + totalWithBuffer * 60_000)
   }
 
   // --- 4. Timeline absolue ---
   const timeline = buildTimeline(segments, departure)
 
-  // --- 5. Jours distincts ---
+  // --- 5. Résumé par jour ---
   const days = buildDaySummaries(timeline)
 
   // --- 6. Conformité ---
   const compliance = analyzeCompliance({
-    segments,
-    rules,
-    dailyDriveMinutes,
-    weeklyDriveMinutes,
-    biweeklyDriveMinutes,
-    extendedDaysThisWeek,
-    useDerogations,
-    maxDaily,
+    segments, rules, dailyDriveMinutes, weeklyDriveMinutes,
+    biweeklyDriveMinutes, extendedDaysThisWeek, useDerogations, maxDaily,
   })
 
   // --- 7. Recommandations ---
   const recommendations = generateRecommendations(compliance, rules, segments, driverState, days)
 
   return {
-    departure,
-    arrival,
-    totalDriveMinutes,
-    totalBreakMinutes,
-    totalStopMinutes,
-    totalRestMinutes,
-    totalTripMinutes,
-    totalWithBuffer,
-    segments,
-    timeline,
-    days,
-    compliance,
-    recommendations,
-    rules,
+    departure, arrival,
+    totalDriveMinutes, totalBreakMinutes, totalStopMinutes, totalRestMinutes,
+    totalTripMinutes, totalWithBuffer,
+    segments, timeline, days, compliance, recommendations, rules,
     isMultiDay: days.length > 1,
   }
 }
 
 // ---------------------------------------------------------------------------
-// Constructeur de segments multi-étapes
+// Constructeur de segments — cœur du planificateur
 // ---------------------------------------------------------------------------
 
 function buildMultiLegSegments({
@@ -131,111 +106,207 @@ function buildMultiLegSegments({
   dailyDriveMinutes,
   breakStrategy,
   useDerogations,
+  workMinutesSinceBreak = 0,
 }) {
-  const MAX_CONT = rules.maxContinuousDrive  // 270
-  const BREAK_DUR = rules.mandatoryBreak     // 45
-  const S1 = rules.splitBreakPart1           // 15
-  const S2 = rules.splitBreakPart2           // 30
-  const MIN_REST = useDerogations ? rules.minDailyRestReduced : rules.minDailyRest
+  const MAX_CONT  = rules.maxContinuousDrive   // 270 min = 4h30
+  const BREAK_DUR = rules.mandatoryBreak        // 45 min
+  const S1        = rules.splitBreakPart1       // 15 min (1ère partie fractionnée)
+  const S2        = rules.splitBreakPart2       // 30 min (2ème partie fractionnée)
+  const MIN_REST  = useDerogations ? rules.minDailyRestReduced : rules.minDailyRest
+
+  // Directive 2002/15/CE — temps de travail effectif
+  const WORK_6H = 360   // après 6h de travail : pause 30 min
+  const WORK_9H = 540   // après 9h de travail : pause 45 min
 
   const segments = []
-  let continuous = continuousMinutesSinceBreak
+  // continuous : conduite continue depuis dernière VRAIE pause (Art. 7)
+  // Les arrêts de travail (chargement, livraison…) NE resetent PAS ce compteur.
+  let continuous  = continuousMinutesSinceBreak
   let dailyDriven = dailyDriveMinutes
-  let dayNumber = 1
+  let dayNumber   = 1
+  // work : travail cumulé depuis la dernière pause (conduite + activités pro)
+  let work    = Math.max(workMinutesSinceBreak, continuousMinutesSinceBreak)
+  let totalKm = 0  // km cumulés depuis le départ
 
+  // --- Helpers ---
+
+  /** Insère une pause conduite obligatoire (Art. 7 UE 561/2006). */
+  function insertDrivingBreak(atKm) {
+    if (breakStrategy === 'split') {
+      // La pause 15 min TOUJOURS en premier, la 30 min ensuite — conformément à l'Art. 7
+      segments.push({
+        type: 'break', duration: S1,
+        reason: `Pause fractionnée 1/2 — ${S1} min (Art. 7 UE 561/2006)`,
+        atKm: Math.round(atKm),
+      })
+      segments.push({
+        type: 'break', duration: S2,
+        reason: `Pause fractionnée 2/2 — ${S2} min (Art. 7 UE 561/2006)`,
+        atKm: Math.round(atKm),
+      })
+    } else {
+      segments.push({
+        type: 'break', duration: BREAK_DUR,
+        reason: `Pause réglementaire — ${BREAK_DUR} min (Art. 7 UE 561/2006)`,
+        atKm: Math.round(atKm),
+      })
+    }
+    continuous = 0
+    work       = 0   // la pause conduite satisfait aussi la pause travail
+  }
+
+  /** Insère une pause temps de travail (Directive 2002/15/CE). */
+  function insertWorkBreak(atKm) {
+    const dur = work >= WORK_9H ? 45 : 30
+    segments.push({
+      type: 'break', duration: dur,
+      reason: `Pause travail — ${dur} min (Dir. 2002/15/CE)`,
+      isWorkBreak: true,
+      atKm: Math.round(atKm),
+    })
+    work = 0
+    // Une pause travail de 45 min satisfait aussi la pause conduite
+    if (dur >= 45) continuous = 0
+  }
+
+  // --- Boucle sur les legs ---
   for (let legIdx = 0; legIdx < legs.length; legIdx++) {
-    const leg = legs[legIdx]
+    const leg   = legs[legIdx]
+    const legKm = leg.distanceKm || 0
     let legRemaining = leg.driveMinutes
+    let legDriven    = 0    // minutes conduites dans ce leg (pour interpolation km)
 
-    // Conduire ce leg (avec pauses si nécessaire et repos inter-jours si limite atteinte)
+    // ── Activité au départ (premier leg seulement) ──
+    if (legIdx === 0 && leg.departureStop?.durationMinutes > 0) {
+      const dep = leg.departureStop
+      segments.push({
+        type: 'stop', duration: dep.durationMinutes,
+        label: dep.label || 'Départ',
+        stopType: dep.type || 'loading',
+        reason: `${STOP_TYPE_LABELS[dep.type] || 'Chargement'} au départ`,
+        atKm: 0, isDeparture: true,
+      })
+      if (dep.type !== 'rest_stop') work += dep.durationMinutes
+      if      (work >= WORK_9H) insertWorkBreak(0)
+      else if (work >= WORK_6H) insertWorkBreak(0)
+    }
+
+    // ── Conduire ce leg ──
     while (legRemaining > 0) {
-      // Vérifier si on dépasse la limite journalière
+
+      // Limite journalière atteinte → repos obligatoire
       if (dailyDriven >= maxDaily) {
-        // Insérer repos obligatoire
         segments.push({
-          type: 'overnight_rest',
-          duration: MIN_REST,
+          type: 'overnight_rest', duration: MIN_REST,
           reason: `Repos journalier obligatoire (${MIN_REST / 60}h) — Jour ${dayNumber}/${dayNumber + 1}`,
           dayNumber,
           derogation: useDerogations && MIN_REST === rules.minDailyRestReduced,
         })
         dayNumber++
         dailyDriven = 0
-        continuous = 0
+        continuous  = 0
+        work        = 0
         continue
       }
 
-      // Combien peut-on conduire avant la prochaine pause obligatoire ?
-      const canContinuous = MAX_CONT - continuous
-      // Combien peut-on conduire avant la limite journalière ?
-      const canDaily = maxDaily - dailyDriven
       // Combien peut-on conduire ?
-      const canDrive = Math.min(canContinuous, canDaily, legRemaining)
+      const canCont  = MAX_CONT - continuous                     // marge conduite continue (Art. 7)
+      const canDay   = maxDaily - dailyDriven                    // marge journalière
+      const canWork  = work >= WORK_6H ? 0 : (WORK_6H - work)  // marge travail (Directive)
+      const canDrive = Math.min(canCont, canDay, canWork, legRemaining)
 
       if (canDrive <= 0) {
-        // Limite continue atteinte → pause obligatoire
+        // Doit insérer une pause avant de conduire
+        const kmHere = totalKm + (leg.driveMinutes > 0 ? (legDriven / leg.driveMinutes) * legKm : 0)
         if (continuous >= MAX_CONT) {
-          if (breakStrategy === 'split' && legRemaining > 0) {
-            segments.push({ type: 'break', duration: S1, reason: 'Pause fractionnée 1/2 — 15 min' })
-            // Après S1, on peut conduire le reste du bloc (jusqu'à 4h30 total)
-            const canAfterS1 = Math.min(MAX_CONT - continuous, canDaily, legRemaining)
-            if (canAfterS1 > 0) {
-              const driveAfterS1 = Math.min(canAfterS1, legRemaining)
-              segments.push({ type: 'drive', duration: driveAfterS1 })
-              legRemaining -= driveAfterS1
-              dailyDriven += driveAfterS1
-              continuous += driveAfterS1
-            }
-            if (legRemaining > 0 || continuous >= MAX_CONT) {
-              segments.push({ type: 'break', duration: S2, reason: 'Pause fractionnée 2/2 — 30 min' })
-              continuous = 0
-            }
-          } else {
-            segments.push({ type: 'break', duration: BREAK_DUR, reason: 'Pause réglementaire — 45 min' })
-            continuous = 0
-          }
+          // La pause conduite a la priorité (elle satisfait aussi la pause travail)
+          insertDrivingBreak(kmHere)
+        } else if (work >= WORK_6H) {
+          insertWorkBreak(kmHere)
+        } else {
+          break  // garde-fou — ne devrait pas arriver
         }
         continue
       }
 
-      // Conduire
-      segments.push({ type: 'drive', duration: canDrive, legIndex: legIdx })
-      legRemaining -= canDrive
-      dailyDriven += canDrive
-      continuous += canDrive
+      // Position km de ce bloc
+      const f0     = leg.driveMinutes > 0 ? legDriven / leg.driveMinutes : 0
+      const f1     = leg.driveMinutes > 0 ? (legDriven + canDrive) / leg.driveMinutes : 1
+      const kmStart = totalKm + f0 * legKm
+      const kmEnd   = totalKm + f1 * legKm
 
-      // Pause si continue atteinte ET encore à conduire
-      if (continuous >= MAX_CONT && (legRemaining > 0 || legIdx < legs.length - 1)) {
-        if (breakStrategy === 'split') {
-          segments.push({ type: 'break', duration: S1, reason: 'Pause fractionnée 1/2 — 15 min' })
-          const nextDrive = Math.min(MAX_CONT - continuous + S1, legRemaining)
-          if (nextDrive > 0) {
-            segments.push({ type: 'drive', duration: nextDrive, legIndex: legIdx })
-            legRemaining -= nextDrive
-            dailyDriven += nextDrive
-            continuous += nextDrive
-          }
-          segments.push({ type: 'break', duration: S2, reason: 'Pause fractionnée 2/2 — 30 min' })
-        } else {
-          segments.push({ type: 'break', duration: BREAK_DUR, reason: 'Pause réglementaire — 45 min' })
-        }
-        continuous = 0
+      // Segment de conduite
+      segments.push({
+        type: 'drive', duration: canDrive,
+        legIndex: legIdx,
+        atKm:   Math.round(kmStart),
+        endKm:  Math.round(kmEnd),
+      })
+      legRemaining -= canDrive
+      legDriven    += canDrive
+      dailyDriven  += canDrive
+      continuous   += canDrive
+      work         += canDrive
+
+      const hasMore = legRemaining > 0 || legIdx < legs.length - 1
+
+      if (continuous >= MAX_CONT && hasMore) {
+        // Pause conduite obligatoire (reset aussi le compteur travail)
+        insertDrivingBreak(kmEnd)
+      } else if (work >= WORK_6H && hasMore) {
+        // Pause travail (Directive) — seulement si la pause conduite n'a pas déjà été insérée
+        insertWorkBreak(kmEnd)
       }
     }
 
-    // Arrêt à l'étape (sauf dernière destination)
-    if (leg.stopDurationMinutes > 0 && legIdx < legs.length - 1) {
+    // Mise à jour du cumul km après ce leg
+    totalKm += legKm
+    const isLast = legIdx === legs.length - 1
+
+    // ── Arrêt à l'étape intermédiaire ──
+    if (!isLast && leg.stopDurationMinutes > 0) {
       segments.push({
-        type: 'stop',
-        duration: leg.stopDurationMinutes,
-        label: leg.stopLabel || `Arrêt ${legIdx + 1}`,
-        stopType: leg.stopType || 'other',
-        reason: `${STOP_TYPE_LABELS[leg.stopType] || 'Arrêt'} — ${leg.stopLabel || ''}`,
+        type: 'stop', duration: leg.stopDurationMinutes,
+        label:    leg.stopLabel || `Arrêt ${legIdx + 1}`,
+        stopType: leg.stopType  || 'other',
+        reason:   `${STOP_TYPE_LABELS[leg.stopType] || 'Arrêt'} — ${leg.stopLabel || ''}`,
+        atKm: Math.round(totalKm),
       })
-      // Un arrêt reset le compteur continu si ≥ 15 min
-      if (leg.stopDurationMinutes >= 15) {
+
+      const isRest = leg.stopType === 'rest_stop'
+
+      if (isRest && leg.stopDurationMinutes >= 45) {
+        // Repos complet : reset conduite ET travail
         continuous = 0
+        work       = 0
+      } else if (isRest && leg.stopDurationMinutes >= S2) {
+        // Repos ≥ 30 min : reset conduite (équivaut à la 2ème partie fractionnée)
+        continuous = 0
+        work       = 0
+      } else if (!isRest) {
+        // Arrêt de travail (chargement, livraison…) : NE reset PAS la conduite continue
+        work += leg.stopDurationMinutes
       }
+      // rest_stop < 30 min → ni reset conduite, ni ajout travail (simple pause courte)
+
+      // Vérifier si pause travail nécessaire après l'arrêt
+      if (!isRest || leg.stopDurationMinutes < S2) {
+        if      (work >= WORK_9H) insertWorkBreak(totalKm)
+        else if (work >= WORK_6H) insertWorkBreak(totalKm)
+      }
+    }
+
+    // ── Activité à l'arrivée (dernier leg seulement) ──
+    if (isLast && leg.arrivalStop?.durationMinutes > 0) {
+      const arr = leg.arrivalStop
+      segments.push({
+        type: 'stop', duration: arr.durationMinutes,
+        label: arr.label || 'Arrivée',
+        stopType: arr.type || 'delivery',
+        reason: `${STOP_TYPE_LABELS[arr.type] || 'Livraison'} à l'arrivée`,
+        atKm: Math.round(totalKm), isArrival: true,
+      })
+      if (arr.type !== 'rest_stop') work += arr.durationMinutes
     }
   }
 
@@ -251,9 +322,9 @@ function buildTimeline(segments, departure) {
   let current = new Date(departure)
 
   for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i]
+    const seg   = segments[i]
     const start = new Date(current)
-    const end = new Date(current.getTime() + seg.duration * 60_000)
+    const end   = new Date(current.getTime() + seg.duration * 60_000)
     timeline.push({ ...seg, index: i, startTime: start, endTime: end })
     current = end
   }
@@ -272,22 +343,20 @@ function buildDaySummaries(timeline) {
   for (const event of timeline) {
     if (event.type === 'overnight_rest') {
       currentDay.restStart = event.startTime
-      currentDay.restEnd = event.endTime
+      currentDay.restEnd   = event.endTime
       days.push(currentDay)
       currentDay = {
-        number: currentDay.number + 1,
-        segments: [],
-        driveMinutes: 0,
-        breakMinutes: 0,
-        stopMinutes: 0,
+        number:      currentDay.number + 1,
+        segments:    [],
+        driveMinutes: 0, breakMinutes: 0, stopMinutes: 0,
         startTime: event.endTime,
       }
     } else {
       currentDay.segments.push(event)
-      if (event.type === 'drive') currentDay.driveMinutes += event.duration
-      if (event.type === 'break') currentDay.breakMinutes += event.duration
-      if (event.type === 'stop') currentDay.stopMinutes += event.duration
-      if (!currentDay.startTime) currentDay.startTime = event.startTime
+      if (event.type === 'drive')  currentDay.driveMinutes += event.duration
+      if (event.type === 'break')  currentDay.breakMinutes += event.duration
+      if (event.type === 'stop')   currentDay.stopMinutes  += event.duration
+      if (!currentDay.startTime)   currentDay.startTime     = event.startTime
       currentDay.endTime = event.endTime
     }
   }
@@ -304,21 +373,14 @@ function analyzeCompliance({
   segments, rules, dailyDriveMinutes, weeklyDriveMinutes,
   biweeklyDriveMinutes, extendedDaysThisWeek, useDerogations, maxDaily,
 }) {
-  const tripDrive = segments.filter(s => s.type === 'drive').reduce((s, seg) => s + seg.duration, 0)
-  const newWeekly = weeklyDriveMinutes + tripDrive
-  const newBiweekly = biweeklyDriveMinutes + tripDrive
+  const tripDrive    = segments.filter(s => s.type === 'drive').reduce((s, seg) => s + seg.duration, 0)
+  const newWeekly    = weeklyDriveMinutes + tripDrive
+  const newBiweekly  = biweeklyDriveMinutes + tripDrive
 
-  // Calculer la conduite max sur une seule journée (pour vérifier sans les repos)
-  const singleDayDrive = dailyDriveMinutes + segments
-    .filter(s => s.type === 'drive')
-    .slice(0, countDriveSegmentsBeforeFirstRest(segments))
-    .reduce((s, seg) => s + seg.duration, 0)
+  const violations        = []
+  const warnings          = []
+  const derogationsUsed   = []
 
-  const violations = []
-  const warnings = []
-  const derogationsUsed = []
-
-  // Vérification hebdomadaire
   if (newWeekly > rules.maxWeeklyDrive) {
     violations.push({
       severity: 'critical',
@@ -326,12 +388,9 @@ function analyzeCompliance({
       article: 'Art. 6(2) UE 561/2006',
     })
   } else if (newWeekly > rules.maxWeeklyDrive * 0.9) {
-    warnings.push({
-      message: `Proche de la limite hebdomadaire : ${Math.round(newWeekly / 60)}h / 56h`,
-    })
+    warnings.push({ message: `Proche de la limite hebdomadaire : ${Math.round(newWeekly / 60)}h / 56h` })
   }
 
-  // Vérification bihebdomadaire
   if (newBiweekly > rules.maxBiweeklyDrive) {
     violations.push({
       severity: 'critical',
@@ -340,21 +399,15 @@ function analyzeCompliance({
     })
   }
 
-  // Dérogation utilisée si repos réduit inséré
   const usedReducedRest = segments.some(s => s.type === 'overnight_rest' && s.derogation)
   if (usedReducedRest) {
     derogationsUsed.push({
-      type: 'reduced_rest',
-      label: 'Repos journalier réduit à 9h (dérogation)',
+      type: 'reduced_rest', label: 'Repos journalier réduit à 9h (dérogation)',
       article: 'Art. 8(1) UE 561/2006',
       info: 'Autorisé 3 fois maximum entre deux repos hebdomadaires',
     })
   }
 
-  // Check dérogation 10h
-  const daysWithExtended = segments
-    .filter(s => s.type === 'overnight_rest')
-    .length + 1 // +1 pour le premier jour
   if (maxDaily > rules.maxDailyDrive && useDerogations) {
     derogationsUsed.push({
       type: 'extended_daily',
@@ -365,21 +418,22 @@ function analyzeCompliance({
 
   const infosReglementaires = []
   const breakCount = segments.filter(s => s.type === 'break').length
-  const restCount = segments.filter(s => s.type === 'overnight_rest').length
-  if (breakCount > 0) infosReglementaires.push(`${breakCount} pause${breakCount > 1 ? 's' : ''} de conduite planifiée${breakCount > 1 ? 's' : ''}`)
-  if (restCount > 0) infosReglementaires.push(`${restCount} repos journalier${restCount > 1 ? 's' : ''} intercalé${restCount > 1 ? 's' : ''} (trajet sur ${restCount + 1} jours)`)
+  const restCount  = segments.filter(s => s.type === 'overnight_rest').length
+  if (breakCount > 0) infosReglementaires.push(`${breakCount} pause${breakCount > 1 ? 's' : ''} planifiée${breakCount > 1 ? 's' : ''}`)
+  if (restCount  > 0) infosReglementaires.push(`${restCount} repos journalier${restCount > 1 ? 's' : ''} intercalé${restCount > 1 ? 's' : ''} (trajet sur ${restCount + 1} jours)`)
+
+  // Détecter les pauses travail (Directive)
+  const workBreakCount = segments.filter(s => s.type === 'break' && s.isWorkBreak).length
+  if (workBreakCount > 0) {
+    infosReglementaires.push(`${workBreakCount} pause${workBreakCount > 1 ? 's' : ''} temps de travail (Directive 2002/15/CE)`)
+  }
 
   return {
     isCompliant: violations.length === 0,
-    violations,
-    warnings,
-    derogationsUsed,
-    infosReglementaires,
-    tripDrive,
-    newWeeklyTotal: newWeekly,
-    newBiweeklyTotal: newBiweekly,
-    remainingWeeklyDrive: Math.max(0, rules.maxWeeklyDrive - newWeekly),
-    remainingBiweeklyDrive: Math.max(0, rules.maxBiweeklyDrive - newBiweekly),
+    violations, warnings, derogationsUsed, infosReglementaires,
+    tripDrive, newWeeklyTotal: newWeekly, newBiweeklyTotal: newBiweekly,
+    remainingWeeklyDrive:    Math.max(0, rules.maxWeeklyDrive    - newWeekly),
+    remainingBiweeklyDrive:  Math.max(0, rules.maxBiweeklyDrive  - newBiweekly),
   }
 }
 
@@ -397,47 +451,51 @@ function countDriveSegmentsBeforeFirstRest(segments) {
 // ---------------------------------------------------------------------------
 
 function generateRecommendations(compliance, rules, segments, driverState, days) {
-  const recs = []
+  const recs   = []
   const breaks = segments.filter(s => s.type === 'break')
-  const rests = segments.filter(s => s.type === 'overnight_rest')
+  const rests  = segments.filter(s => s.type === 'overnight_rest')
 
   if (rests.length > 0) {
     recs.push({
-      type: 'info',
-      title: `Trajet sur ${days.length} jours`,
+      type: 'info', title: `Trajet sur ${days.length} jours`,
       body: `Ce trajet nécessite ${rests.length} repos journalier${rests.length > 1 ? 's' : ''} intercalé${rests.length > 1 ? 's' : ''}. Prévoyez un hébergement ou un parking PL sécurisé.`,
     })
   }
 
   if (compliance.derogationsUsed.some(d => d.type === 'extended_daily')) {
     recs.push({
-      type: 'warning',
-      title: 'Dérogation 10h/jour',
+      type: 'warning', title: 'Dérogation 10h/jour',
       body: `Vérifiez que vous n'avez pas déjà utilisé cette dérogation ${rules.maxExtendedPerWeek} fois cette semaine.`,
     })
   }
 
   if (breaks.length === 0 && rests.length === 0) {
     recs.push({
-      type: 'success',
-      title: 'Trajet fluide',
+      type: 'success', title: 'Trajet fluide',
       body: 'Aucune pause ni repos obligatoire requis pour ce trajet.',
     })
   }
 
   if (compliance.remainingWeeklyDrive < 300) {
     recs.push({
-      type: 'warning',
-      title: 'Solde hebdo faible',
+      type: 'warning', title: 'Solde hebdo faible',
       body: `Il vous reste ${Math.round(compliance.remainingWeeklyDrive / 60 * 10) / 10}h de conduite autorisées cette semaine.`,
     })
   }
 
   if (compliance.violations.length > 0) {
     recs.push({
-      type: 'error',
-      title: 'Trajet non conforme',
+      type: 'error', title: 'Trajet non conforme',
       body: 'Ce trajet dépasse vos quotas restants. Envisagez de décaler le départ à la semaine suivante.',
+    })
+  }
+
+  // Rappel sur les pauses travail
+  const workBreaks = segments.filter(s => s.type === 'break' && s.isWorkBreak)
+  if (workBreaks.length > 0) {
+    recs.push({
+      type: 'info', title: `${workBreaks.length} pause${workBreaks.length > 1 ? 's' : ''} travail planifiée${workBreaks.length > 1 ? 's' : ''} (Directive)`,
+      body: `La Directive 2002/15/CE impose une pause après 6h de travail effectif (conduite + activités). Ces pauses sont intégrées au planning.`,
     })
   }
 
@@ -449,12 +507,12 @@ function generateRecommendations(compliance, rules, segments, driverState, days)
 // ---------------------------------------------------------------------------
 
 export const STOP_TYPES = [
-  { id: 'loading', label: 'Chargement', icon: '🔧', defaultDuration: 45 },
-  { id: 'delivery', label: 'Livraison', icon: '📦', defaultDuration: 20 },
-  { id: 'fuel', label: 'Carburant', icon: '⛽', defaultDuration: 15 },
-  { id: 'customs', label: 'Douane', icon: '🛂', defaultDuration: 30 },
+  { id: 'loading',   label: 'Chargement',     icon: '🔧', defaultDuration: 45 },
+  { id: 'delivery',  label: 'Livraison',       icon: '📦', defaultDuration: 20 },
+  { id: 'fuel',      label: 'Carburant',       icon: '⛽', defaultDuration: 15 },
+  { id: 'customs',   label: 'Douane',          icon: '🛂', defaultDuration: 30 },
   { id: 'rest_stop', label: 'Pause technique', icon: '🅿️', defaultDuration: 30 },
-  { id: 'other', label: 'Autre arrêt', icon: '📍', defaultDuration: 15 },
+  { id: 'other',     label: 'Autre arrêt',     icon: '📍', defaultDuration: 15 },
 ]
 
 export const STOP_TYPE_LABELS = Object.fromEntries(STOP_TYPES.map(s => [s.id, s.label]))
@@ -474,13 +532,7 @@ export function planTrip({
   driverState = {},
 }) {
   return planMultiLegTrip({
-    legs: [{ driveMinutes: rawDriveMinutes, stopDurationMinutes: 0, stopLabel: '' }],
-    vehicleTypeId,
-    mode,
-    targetTime,
-    bufferMinutes,
-    breakStrategy,
-    useDerogations,
-    driverState,
+    legs: [{ driveMinutes: rawDriveMinutes, stopDurationMinutes: 0, stopLabel: '', distanceKm: 0 }],
+    vehicleTypeId, mode, targetTime, bufferMinutes, breakStrategy, useDerogations, driverState,
   })
 }

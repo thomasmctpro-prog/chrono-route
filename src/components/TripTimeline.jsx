@@ -217,6 +217,9 @@ function EventList({ events, compact = false }) {
                       : evt.reason || style.label
                   }
                 </span>
+                {evt.type === 'break' && evt.atKm > 0 && (
+                  <span className="text-muted/60 text-xs flex-shrink-0">≈{evt.atKm} km</span>
+                )}
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
                 <span className={`text-xs font-semibold ${style.text}`}>
